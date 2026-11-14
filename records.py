@@ -46,7 +46,6 @@ class Records:
                 pass
 
     @staticmethod
- ascii
     def key(bvid, cid, ep_id=0):
         if bvid and cid:
             return "%s:%s" % (bvid, cid)
