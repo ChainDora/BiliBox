@@ -53,7 +53,13 @@ class Records:
             return "ep:%s" % ep_id
         return ""
 
-    def mark(self, k, title, file, size):
+    def mark(self, k, title, file, size, qual="", qual_text="", max_h=0):
+        """记一条下载。
+
+        qual 存「实际拿到的画质标签」（如 v720_AVC），跳过判断靠它区分
+        同一个视频的不同画质；max_h 存当时选的档位（2160/1080/720…），
+        前端靠它判断「这条在本次选的画质下算不算已下载」。
+        """
         if not k:
             return
         with self._lock:
@@ -61,6 +67,9 @@ class Records:
                 "title": title or "",
                 "file": file or "",
                 "size": int(size or 0),
+                "qual": qual or "",
+                "qual_text": qual_text or "",
+                "max_h": int(max_h or 0),
                 "ts": int(time.time()),
             }
         self.save()
