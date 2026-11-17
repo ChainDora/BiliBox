@@ -767,6 +767,21 @@ class BiliClient:
                 "owner": "", "desc": "", "items": items[:limit] if limit else items,
                 "total": len(items), "url": ""}
 
+    @staticmethod
+    def _pgc_seconds(v):
+        """番剧（pgc）接口的 duration 单位是毫秒，普通视频是秒。
+
+        这里做双向兼容：超过 24 小时的值按毫秒处理，否则按秒原样返回。
+        一集番剧不可能超过 24 小时，所以 86400 是个安全的判定线。
+        """
+        try:
+            n = int(v or 0)
+        except Exception:
+            return 0
+        if n > 86400:
+            n //= 1000
+        return n
+
     def _parse_bangumi(self, kind, sid, limit=0):
         if kind == "ss":
             d = self.api("/pgc/view/web/season", {"season_id": sid},
@@ -784,9 +799,11 @@ class BiliClient:
                 "ep_id": ep.get("id") or ep.get("ep_id"),
                 "aid": ep.get("aid"),
                 "index": ep.get("ep") or i,
-                "title": ep.get("title") or ep.get("long_title") or ("第%d话" % i),
+                "title": (("%s %s" % ((ep.get("title") or "").strip(),
+                                     (ep.get("long_title") or "").strip())).strip()
+                          or ("第%d话" % i)),
                 "long_title": ep.get("long_title") or "",
-                "duration": ep.get("duration") or 0,
+                "duration": self._pgc_seconds(ep.get("duration")),
                 "cover": self._cover(ep.get("pic")) or cover,
                 "kind": "bangumi",
             })
