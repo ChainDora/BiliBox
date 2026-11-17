@@ -41,7 +41,7 @@ from records import Records, Cache
 import downloader as dl
 
 APP_NAME = "BiliBox"
-APP_VER = "2.1"
+APP_VER = "2.2"
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
 config = Config(BASE_DIR)
@@ -169,6 +169,30 @@ def pick_audio(audios, pref):
             if a.get("id") == want:
                 return a
     return max(audios, key=lambda a: (a.get("bandwidth") or 0))
+
+
+def quality_tag(info, max_h, opts, audio_only):
+    """把「这次实际能拿到的画质」压成一个稳定标签，返回 (缓存标签, 人读名)。
+
+    缓存目录、已存在跳过、下载记录三处必须共用同一个值。原来跳过只看
+    路径存在与否（而路径里没有画质），所以先下 720P、再选 4K 时会被直接
+    判成「已下载」，点下载几秒就完成，盘里还是低画质那份。
+    """
+    if audio_only:
+        pref = str(opts.get("audio") or "best")
+        return ("a%s" % pref, "仅音频 %s" % pref)
+    videos = (info or {}).get("videos") or []
+    if not videos:
+        return ("durl", "原始画质")
+    v = pick_video(videos, int(max_h or 1080), opts.get("codec") or "avc")
+    if not v:
+        return ("durl", "原始画质")
+    h = int(v.get("height") or 0)
+    qname = QUALITY_NAMES.get(v.get("id"), "") or (("%dp" % h) if h else "未知")
+    codec = (v.get("codecs") or "").split(".")[0].strip().upper()
+    tag = "v%s%s" % (h or v.get("id") or 0, ("_" + codec) if codec else "")
+    text = qname + ((" · " + codec) if codec else "")
+    return (tag, text)
 
 
 def open_folder(path):
@@ -615,8 +639,12 @@ class JobManager:
             raise BiliError("取流失败：可能需要登录，或该视频有地区/会员限制（%s）" % (last_err or ""))
 
         ffmpeg = dl.find_ffmpeg(BASE_DIR)
-        # 每个视频一个稳定缓存目录：中断后重开能从已下好的分片接着走
-        tmp_dir = cache.dir_for(bvid, cid, ep_id)
+        audio_only = bool(opts.get("audio_only"))
+        # 画质标签：缓存目录 / 跳过判断 / 下载记录三处共用同一个值
+        qtag, qlabel = quality_tag(info, max_h, opts, audio_only)
+        # 每个视频一个稳定缓存目录：中断后重开能从已下好的分片接着走。
+        # 目录名带上画质，720P 下的残缺缓存不会被 4K 复用（分片对不上会下坏）
+        tmp_dir = cache.dir_for(bvid, cid, ep_id, tag=qtag)
 
         # 按来源（合集 / 多分P 视频）分组存放到子文件夹，避免混在一个目录里
         grp = it.get("group") or ""
@@ -668,17 +696,29 @@ class JobManager:
                 d = video_dir
             return os.path.join(d, stem + ext)
 
-        audio_only = bool(opts.get("audio_only"))
         out_path = os.path.join(video_dir, stem + (".m4a" if audio_only else ".mp4"))
+        rec_key = records.key(bvid, cid, ep_id)
 
-        # 目标文件已经在了就跳过，重复下同一个收藏夹不重复吃带宽
+        # 目标文件已经在了就跳过，重复下同一个收藏夹不重复吃带宽。
+        # 但「文件在」不等于「是这次要的画质」：先下 720P、再选 4K，必须重下覆盖，
+        # 否则点下载几秒就「完成」，盘里还是低画质那份。
+        # 老记录没有 qual 字段，保持原来的跳过行为，不去打扰已经下过的人。
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            it["file"] = out_path
-            it["filesize"] = os.path.getsize(out_path)
-            it["progress"]["percent"] = 100
-            it["stage"] = "已存在"
-            job.log("已存在，跳过：%s" % os.path.basename(out_path))
-            return
+            prev = records.get(rec_key) or {}
+            prev_q = (prev.get("qual") or "").strip()
+            if prev_q and prev_q != qtag:
+                job.log("已有 %s，本次要 %s，重下并覆盖：%s"
+                        % (prev.get("qual_text") or "其它画质", qlabel, os.path.basename(out_path)))
+            else:
+                it["file"] = out_path
+                it["filesize"] = os.path.getsize(out_path)
+                it["progress"]["percent"] = 100
+                it["stage"] = "已存在"
+                # 把「实际能拿到的画质」写进日志：用户选了 4K 但这视频本身最高
+                # 只给 1080P 时，他得看得到为什么这次没重下，而不是以为漏了
+                job.log("已存在，跳过：%s（实际可下画质 %s，与已有文件相同）"
+                        % (os.path.basename(out_path), qlabel))
+                return
 
         # 真要下载了才建缓存目录；提前建会在跳过路径上留下空壳
         os.makedirs(tmp_dir, exist_ok=True)
@@ -804,7 +844,8 @@ class JobManager:
         it["stage"] = "完成"
         job.log("完成：%s (%s)" % (os.path.basename(out_path), human(it["filesize"])))
         try:
-            records.mark(records.key(bvid, cid, ep_id), it["title"], out_path, it["filesize"])
+            records.mark(rec_key, it["title"], out_path, it["filesize"],
+                         qual=qtag, qual_text=qlabel, max_h=max_h)
         except Exception:
             pass
 
@@ -1092,10 +1133,17 @@ class Handler(BaseHTTPRequestHandler):
         client = BiliClient(cookie_str=config.get("cookie") or "", proxy=config.get("proxy") or None)
         data = client.parse(url)
         data["ok"] = True
-        # 标记哪些已经下过了，前端据此只勾选新增
+        # 标记哪些已经下过了，前端据此只勾选新增。
+        # 同时把「上次下的是什么画质」带回去：只给布尔会让 720P 下过的条目
+        # 在 4K 模式下也标成已下载，用户切完画质发现一条都没被勾上。
         try:
             for it in data.get("items") or []:
-                it["downloaded"] = records.has(it.get("bvid"), it.get("cid"), it.get("ep_id"))
+                k = records.key(it.get("bvid"), it.get("cid"), it.get("ep_id"))
+                r = records.get(k) or {}
+                it["downloaded"] = bool(r)
+                it["dl_qual"] = r.get("qual") or ""
+                it["dl_qual_text"] = r.get("qual_text") or ""
+                it["dl_max_h"] = r.get("max_h") or 0
         except Exception:
             pass
         # 附上画质名称映射，前端友好展示
