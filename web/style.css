@@ -917,6 +917,12 @@ svg { width: 20px; height: 20px; flex: 0 0 auto; }
 .item-badge[hidden] { display: none; }
 .item-row.downloaded .item-title { color: var(--text-3); }
 
+/* 下过、但那份是低画质：不置灰，只提示「已下 720P」，让用户知道这次要重下 */
+.item-badge.stale {
+  background: rgba(214, 138, 22, .14);
+  color: #b57216;
+}
+
 .link-btn {
   font-size: 12.8px;
   color: var(--brand-deep);
