@@ -88,6 +88,10 @@
     try {
       const st = await api('/api/status');
       state.status = st;
+      // 版本号只有 APP_VER 这一个真相源：徽标从接口取，别再往 HTML 里写死
+      // （之前就是写死在 index.html 里，改了 APP_VER 徽标还停在 2.0）
+      const bv = $('#brandVer');
+      if (bv && st.version) bv.textContent = st.version;
       const pill = $('#envPill');
       const ok = st.ffmpeg;
       pill.className = 'status-dot ' + (ok ? 'is-ok' : 'is-warn');
@@ -132,10 +136,10 @@
     try {
       const res = await api('/api/parse', { method: 'POST', body: JSON.stringify({ url }) });
       state.parsed = res;
-      // 默认只勾还没下过的；全下过就退成全选，方便重下
-      const freshIdx = res.items.map((_, i) => i).filter((i) => !res.items[i].downloaded);
+      // 默认只勾「当前画质下还没下够」的；全都够数才退成全选，方便重下
+      const freshIdx = res.items.map((_, i) => i).filter((i) => dlFlags(res.items[i]).state !== 'yes');
       state.selected = new Set(freshIdx.length ? freshIdx : res.items.map((_, i) => i));
-      const nOld = res.items.filter((x) => x.downloaded).length;
+      const nOld = res.items.filter((x) => dlFlags(x).state === 'yes').length;
       if (nOld) $('#selNewBtn').hidden = false;
       // 合集较多时只展开第一个，其余折叠成组头
       const gs = [...new Set(res.items.map((it) => it.group || ''))].filter(Boolean);
@@ -232,17 +236,32 @@
       .filter(({ it }) => !kw || (it.title || '').toLowerCase().includes(kw));
   }
 
+  // 「已下载」要跟着当前选的画质走。
+  // 720P 下过的条目在 4K 模式下不算已下载，否则用户切到 4K 发现一条都没勾上，
+  // 手动勾了又会被后端当成「已存在」秒跳过——就是这次报的那个 bug。
+  // 老记录没有 dl_max_h 字段，按「已下载」处理，不打扰已经下过的人。
+  function dlFlags(it) {
+    if (!it.downloaded) return { state: 'no', text: '' };
+    const had = parseInt(it.dl_max_h || 0, 10);
+    const want = parseInt($('#optQuality').value, 10) || 1080;
+    if (!had || had === want) return { state: 'yes', text: '已下载' };
+    // 角标位置窄，只取画质那一截："480P 清晰 · AVC1" → "480P"
+    const qt = String(it.dl_qual_text || '').split(/[\s·]/)[0] || (had + 'P');
+    return { state: 'stale', text: '已下 ' + qt };
+  }
+
   function makeRow(it, i, grouped, label) {
     const row = document.createElement('li');
+    const fl = dlFlags(it);
     row.className = 'item-row' + (state.selected.has(i) ? ' checked' : '') + (grouped ? ' grouped' : '') +
-      (it.downloaded ? ' downloaded' : '');
+      (fl.state === 'yes' ? ' downloaded' : '');
     row.dataset.idx = i;
     const num = label != null ? label : (it.top_index || it.index || (i + 1));
     row.innerHTML =
       `<input type="checkbox" ${state.selected.has(i) ? 'checked' : ''}>` +
       `<span class="item-idx">${num}</span>` +
       `<span class="item-title" title="${esc(it.title)}">${esc(it.title)}</span>` +
-      `<span class="item-badge" ${it.downloaded ? '' : 'hidden'}>已下载</span>` +
+      `<span class="item-badge${fl.state === 'stale' ? ' stale' : ''}" ${fl.state === 'no' ? 'hidden' : ''}>${esc(fl.text || '已下载')}</span>` +
       `<span class="item-dur">${it.duration ? fmtDur(it.duration) : ''}</span>`;
     return row;
   }
@@ -866,9 +885,9 @@
 
   $('#selNewBtn').addEventListener('click', () => {
     const items = state.parsed ? state.parsed.items : [];
-    state.selected = new Set(items.map((_, i) => i).filter((i) => !items[i].downloaded));
+    state.selected = new Set(items.map((_, i) => i).filter((i) => dlFlags(items[i]).state !== 'yes'));
     renderItems(true);
-    toast(`已只勾选 ${state.selected.size} 个未下载的条目`);
+    toast(`已只勾选 ${state.selected.size} 个当前画质下未下载的条目`);
   });
 
   $('#checkAll').addEventListener('change', (e) => {
@@ -969,9 +988,16 @@
   });
   $('#loginDialog').addEventListener('close', () => clearInterval(state.qrTimer));
 
-  // 设置弹窗打开时同步画质等
+  // 设置弹窗打开时同步画质等；切画质要重算「已下载」标记
   $('#optQuality').addEventListener('change', () => {
     state.config.max_height = parseInt($('#optQuality').value, 10);
+    if (!state.parsed) return;
+    const items = state.parsed.items;
+    // 换画质等于换一份产物：720P 下过的条目在 4K 下要重新勾上，否则根本勾不了
+    state.selected = new Set(items.map((_, i) => i).filter((i) => dlFlags(items[i]).state !== 'yes'));
+    renderItems(true);
+    const stale = items.filter((x) => dlFlags(x).state === 'stale').length;
+    if (stale) toast(`${stale} 条之前下的是低画质，已按当前画质重新勾选`);
   });
 
   // 键盘快捷键
