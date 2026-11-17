@@ -41,7 +41,7 @@ from records import Records, Cache
 import downloader as dl
 
 APP_NAME = "BiliBox"
-APP_VER = "2.0"
+APP_VER = "2.1"
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
 config = Config(BASE_DIR)
